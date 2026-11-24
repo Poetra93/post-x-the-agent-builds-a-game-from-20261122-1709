@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>NEON VOID — one prompt, one game</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#05010d;overflow:hidden}
+  body{font-family:"DejaVu Sans Mono",monospace}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;background:#05010d;box-shadow:0 0 60px #3b0a5e inset;
+    border:1px solid #2a0a4a}
+  #hint{position:fixed;left:0;right:0;bottom:10px;text-align:center;color:#7a5cff;
+    font-size:13px;letter-spacing:1px;opacity:.8;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+<div id="hint">ARROWS / WASD move &nbsp;·&nbsp; SPACE shoot &nbsp;·&nbsp; R restart &nbsp;·&nbsp; touch: drag to fly</div>
+<script>
+"use strict";
+/* NEON VOID — a tiny neon arcade game, built from ONE prompt:
+   "fly a ship, shoot asteroids, score points, 3 lives, speed ramps up,
+    game over screen with restart." */
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const DEMO = new URLSearchParams(location.search).get("demo") === "1";
+
+const state = {
+  mode: "title",      // title | play | over
+  score: 0, lives: 3, level: 1,
+  ship: { x: W / 2, y: H - 80, vx: 0, vy: 0, r: 16, inv: 0 },
+  bullets: [], rocks: [], parts: [], stars: [],
+  keys: {}, shootCd: 0, spawnT: 0, time: 0, flash: 0,
+};
+for (let i = 0; i < 90; i++)
+  state.stars.push({ x: Math.random() * W, y: Math.random() * H,
+    s: Math.random() * 2 + .5, v: Math.random() * 30 + 8 });
+
+function reset() {
+  state.score = 0; state.lives = 3; state.level = 1;
+  state.bullets = []; state.rocks = []; state.parts = [];
+  state.ship.x = W / 2; state.ship.y = H - 80; state.ship.inv = 0;
+  state.spawnT = 0; state.mode = "play";
+}
+function spawnRock() {
+  const big = Math.random() < .25;
+  const r = big ? 34 + Math.random() * 12 : 14 + Math.random() * 14;
+  const sp = (40 + Math.random() * 40 + state.level * 9) * (big ? .7 : 1);
+  state.rocks.push({ x: 30 + Math.random() * (W - 60), y: -r - 10, r,
+    vy: sp, vx: (Math.random() - .5) * 40, rot: Math.random() * 6.28,
+    vr: (Math.random() - .5) * 2, pts: big ? 30 : 10,
+    verts: Array.from({ length: 9 }, () => .75 + Math.random() * .45) });
+}
+function explode(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, s = 60 + Math.random() * 220;
+    state.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      life: .5 + Math.random() * .5, color });
+  }
+}
+
+/* ---- input: keyboard + touch ---- */
+addEventListener("keydown", e => {
+  state.keys[e.code] = true;
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code))
+    e.preventDefault();
+  if (e.code === "Space" || e.code === "Enter") {
+    if (state.mode === "title" || state.mode === "over") reset();
+  }
+  if (e.code === "KeyR" && state.mode !== "title") reset();
+});
+addEventListener("keyup", e => { state.keys[e.code] = false; });
+let touchX = null, touchY = null;
+cv.addEventListener("touchstart", e => {
+  e.preventDefault();
+  const t = e.touches[0], r = cv.getBoundingClientRect();
+  touchX = (t.clientX - r.left) * W / r.width;
+  touchY = (t.clientY - r.top) * H / r.height;
+  if (state.mode !== "play") reset();
+}, { passive: false });
+cv.addEventListener("touchmove", e => {
+  e.preventDefault();
+  const t = e.touches[0], r = cv.getBoundingClientRect();
+  touchX = (t.clientX - r.left) * W / r.width;
+  touchY = (t.clientY - r.top) * H / r.height;
+}, { passive: false });
+cv.addEventListener("touchend", () => { touchX = touchY = null; });
+cv.addEventListener("mousedown", () => {
+  if (state.mode !== "play") reset();
+});
+
+/* ---- demo autoplay: the ship flies and shoots itself ---- */
+function demoPilot(dt) {
+  const s = state.ship;
+  let target = null, best = 1e9;
+  for (const r of state.rocks) {
+    const d = Math.abs(r.x - s.x) + (H - r.y) * .4;
+    if (d < best) { best = d; target = r; }
+  }
+  if (target) {
+    const dx = target.x - s.x;
+    s.x += Math.max(-340 * dt, Math.min(340 * dt, dx * 6 * dt));
+  } else {
+    s.x += Math.sin(state.time * 1.4) * 120 * dt;
+  }
+  s.x = Math.max(24, Math.min(W - 24, s.x));
+  s.y = H - 80 + Math.sin(state.time * 2) * 12;
+  if (state.shootCd <= 0) fire();
+}
+function fire() {
+  const s = state.ship;
+  state.bullets.push({ x: s.x, y: s.y - 20, vy: -620 });
+  state.shootCd = .16;
+}
+
+/* ---- update ---- */
+function update(dt) {
+  state.time += dt;
+  for (const st of state.stars) {
+    st.y += st.v * dt; if (st.y > H) { st.y = -2; st.x = Math.random() * W; }
+  }
+  if (state.flash > 0) state.flash -= dt;
+  if (state.mode !== "play") return;
+  const s = state.ship;
+  if (DEMO) demoPilot(dt);
+  else {
+    const sp = 420;
+    let mx = (state.keys.ArrowRight || state.keys.KeyD ? 1 : 0)
+           - (state.keys.ArrowLeft  || state.keys.KeyA ? 1 : 0);
+    let my = (state.keys.ArrowDown  || state.keys.KeyS ? 1 : 0)
+           - (state.keys.ArrowUp    || state.keys.KeyW ? 1 : 0);
+    if (touchX !== null) {
+      s.x += (touchX - s.x) * Math.min(1, dt * 14);
+      s.y += (touchY - s.y) * Math.min(1, dt * 14);
+    } else {
+      s.x += mx * sp * dt; s.y += my * sp * dt;
+    }
+    s.x = Math.max(20, Math.min(W - 20, s.x));
+    s.y = Math.max(60, Math.min(H - 20, s.y));
+    if (state.keys.Space && state.shootCd <= 0) fire();
+  }
+  if (state.shootCd > 0) state.shootCd -= dt;
+  if (s.inv > 0) s.inv -= dt;
+  state.spawnT -= dt;
+  if (state.spawnT <= 0) {
+    spawnRock();
+    state.spawnT = Math.max(.28, .9 - state.level * .06);
+  }
+  state.level = 1 + Math.floor(state.score / 150);
+  for (const b of state.bullets) b.y += b.vy * dt;
+  state.bullets = state.bullets.filter(b => b.y > -10);
+  for (const r of state.rocks) {
+    r.y += r.vy * dt; r.x += r.vx * dt; r.rot += r.vr * dt;
+    if (r.x < r.r) { r.x = r.r; r.vx = Math.abs(r.vx); }
+    if (r.x > W - r.r) { r.x = W - r.r; r.vx = -Math.abs(r.vx); }
+  }
+
+  // bullets vs rocks
+  for (const b of state.bullets) for (const r of state.rocks) {
+    const dx = b.x - r.x, dy = b.y - r.y;
+    if (dx * dx + dy * dy < (r.r + 4) * (r.r + 4)) {
+      b.y = -999; r.y = H + 999;
+      state.score += r.pts;
+      explode(r.x, Math.max(10, r.y), "#ff2fd6", r.r > 26 ? 22 : 12);
+    }
+  }
+  state.bullets = state.bullets.filter(b => b.y > -20);
+  state.rocks = state.rocks.filter(r => r.y < H + 60);
+  // rocks vs ship
+  if (s.inv <= 0) for (const r of state.rocks) {
+    const dx = s.x - r.x, dy = s.y - r.y;
+    if (dx * dx + dy * dy < (r.r + s.r - 6) * (r.r + s.r - 6)) {
+      r.y = H + 999; state.lives--; state.flash = .25; s.inv = 2;
+      explode(s.x, s.y, "#00f0ff", 26);
+      if (state.lives <= 0) {
+        state.mode = "over";
+        explode(s.x, s.y, "#ffffff", 60);
+        if (DEMO) setTimeout(reset, 2500); // demo plays forever
+      }
+      break;
+    }
+  }
+  for (const p of state.parts) {
+    p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+  }
+  state.parts = state.parts.filter(p => p.life > 0);
+}
+
+/* ---- draw ---- */
+function drawRock(r) {
+  ctx.save(); ctx.translate(r.x, r.y); ctx.rotate(r.rot);
+  ctx.beginPath();
+  for (let i = 0; i < r.verts.length; i++) {
+    const a = i / r.verts.length * 6.283, rr = r.r * r.verts[i];
+    i ? ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr)
+      : ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.closePath();
+  ctx.strokeStyle = "#ff2fd6"; ctx.lineWidth = 2;
+  ctx.shadowColor = "#ff2fd6"; ctx.shadowBlur = 14; ctx.stroke();
+  ctx.restore();
+}
+function drawShip() {
+  const s = state.ship;
+  if (s.inv > 0 && Math.floor(state.time * 12) % 2 === 0) return; // blink
+  ctx.save(); ctx.translate(s.x, s.y);
+  ctx.beginPath();
+  ctx.moveTo(0, -20); ctx.lineTo(14, 14); ctx.lineTo(0, 7); ctx.lineTo(-14, 14);
+  ctx.closePath();
+  ctx.fillStyle = "#00f0ff"; ctx.shadowColor = "#00f0ff"; ctx.shadowBlur = 18;
+  ctx.fill();
+  ctx.beginPath(); // engine flame
+  ctx.moveTo(-5, 14); ctx.lineTo(0, 26 + Math.random() * 8); ctx.lineTo(5, 14);
+  ctx.closePath(); ctx.fillStyle = "#ffb300"; ctx.fill();
+  ctx.restore();
+}
+function text(str, x, y, size, color, align) {
+  ctx.font = "bold " + size + "px 'DejaVu Sans Mono', monospace";
+  ctx.textAlign = align || "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 16;
+  ctx.fillText(str, x, y); ctx.shadowBlur = 0;
+}
+function draw() {
+  ctx.fillStyle = "#05010d"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff";
+  for (const st of state.stars) {
+    ctx.globalAlpha = .3 + st.s * .3; ctx.fillRect(st.x, st.y, st.s, st.s);
+  }
+  ctx.globalAlpha = 1;
+  for (const p of state.parts) {
+    ctx.globalAlpha = Math.max(0, p.life * 2);
+    ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+  for (const b of state.bullets) {
+    ctx.fillStyle = "#ffe600"; ctx.shadowColor = "#ffe600"; ctx.shadowBlur = 10;
+    ctx.fillRect(b.x - 2, b.y - 12, 4, 14);
+  }
+  ctx.shadowBlur = 0;
+  for (const r of state.rocks) drawRock(r);
+  if (state.mode !== "over") drawShip();
+  // HUD
+  ctx.textAlign = "left"; ctx.textBaseline = "top";
+  text("SCORE " + state.score, 18, 16, 22, "#00f0ff", "left");
+  text("LEVEL " + state.level, W - 18, 16, 22, "#ff2fd6", "right");
+  let hearts = "";
+  for (let i = 0; i < 3; i++) hearts += i < state.lives ? "♥ " : "♡ ";
+  text(hearts, 18, 46, 22, "#ff3860", "left");
+  if (state.mode === "title") {
+    text("NEON VOID", W / 2, H / 2 - 70, 64, "#00f0ff");
+    text("one prompt · one game", W / 2, H / 2 - 18, 22, "#ff2fd6");
+    text(DEMO ? "autoplay demo" : "SPACE / TAP TO START", W / 2, H / 2 + 40, 24, "#ffffff");
+    text("ARROWS / WASD move · SPACE shoot · 3 lives", W / 2, H / 2 + 82, 18, "#9a8cff");
+  }
+  if (state.mode === "over") {
+    text("GAME OVER", W / 2, H / 2 - 40, 56, "#ff3860");
+    text("SCORE " + state.score + " · LEVEL " + state.level, W / 2, H / 2 + 18, 24, "#ffffff");
+    text(DEMO ? "restarting…" : "press R or SPACE to fly again", W / 2, H / 2 + 62, 20, "#9a8cff");
+  }
+  if (state.flash > 0) {
+    ctx.fillStyle = "rgba(255,56,96," + (state.flash * 1.6) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+/* ---- main loop ---- */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+if (DEMO) reset(); // demo jumps straight into play
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
